@@ -250,8 +250,18 @@ def handler_attribute(zmq_name, jsonobj, hasAlreadyBeenContributed=False, parent
                                 jsonattr['category'],
                                 action,
                                 isLabeled=eventLabeled)
+        jsonobj_tmp = { 'Event': {'id':jsonobj['Event']['id'], },
+                'Attribute': {
+                    'id': jsonobj['Attribute']['id'],
+                    'type': jsonobj['Attribute']['type'],
+                    'category': jsonobj['Attribute']['category'],
+                    'event_id': jsonobj['Attribute']['event_id'],
+                    'timestamp': jsonobj['Attribute']['timestamp'],
+                    'value': jsonobj['Attribute']['value'],
+                    'comment': jsonobj['Attribute']['comment'],
+        }}
         # Push to log
-        live_helper.publish_log(zmq_name, attributeType, jsonobj)
+        live_helper.publish_log(zmq_name, attributeType, jsonobj_tmp)
     else:
         failas = open("/tmp/debugas","a")
         failas.write(jsonattr['value'] + "\n")
