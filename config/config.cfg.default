@@ -55,6 +55,8 @@ subscriber_filename=zmq_subscriber.log
 helpers_filename=helpers.log
 update_filename=updates.log
 clientInfo=/opt/orchestration/List.txt
+import_tag_all_attributes=testtag
+dashboard_user_auth_key=auth_key
 
 [RedisGlobal]
 host=localhost

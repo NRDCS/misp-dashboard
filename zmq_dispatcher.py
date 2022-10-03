@@ -19,6 +19,7 @@ import updates
 
 import ipaddress
 import re
+import requests
 
 from helpers import (contributor_helper, geo_helper, live_helper,
                      trendings_helper, users_helper)
@@ -32,6 +33,8 @@ cidr_array = []
 clientInfo = cfg.get('Log','clientInfo')
 logDir = cfg.get('Log', 'directory')
 logfilename = cfg.get('Log', 'dispatcher_filename')
+import_tag_all_attributes = cfg.get('Log', 'import_tag_all_attributes')
+dashboard_user_auth_key = cfg.get('Log', 'dashboard_user_auth_key')
 logPath = os.path.join(logDir, logfilename)
 if not os.path.exists(logDir):
     os.makedirs(logDir)
@@ -41,9 +44,6 @@ except PermissionError as error:
     print(error)
     print("Please fix the above and try again.")
     sys.exit(126)
-
-#cidr_array = create_cidr_array()
-#print(cidr_array)
 
 logger = logging.getLogger('zmq_dispatcher')
 
@@ -233,7 +233,17 @@ def handler_attribute(zmq_name, jsonobj, hasAlreadyBeenContributed=False, parent
         tags.append(tag)
     trendings_helper.addTrendingTags(tags, timestamp)
 
-    if check_ip(jsonattr['value'], cidr_array):
+    import_all_attributes = False
+    if 'Tag' in jsonobj['Event']:
+      for tag in jsonobj['Event']['Tag']:
+        if tag['name'] == import_tag_all_attributes:
+          import_all_attributes = True
+    else:
+        eventid = jsonobj['Attribute']['event_id']
+        if check_event_tag(eventid):
+            import_all_attributes = True
+
+    if check_ip(jsonattr['value'], cidr_array) or import_all_attributes:
     #    try to get coord from ip
         if jsonattr['category'] == "Network activity":
             geo_helper.getCoordFromIpAndPublish(jsonattr['value'], jsonattr['category'])
@@ -250,7 +260,9 @@ def handler_attribute(zmq_name, jsonobj, hasAlreadyBeenContributed=False, parent
                                 jsonattr['category'],
                                 action,
                                 isLabeled=eventLabeled)
-        jsonobj_tmp = { 'Event': {'id':jsonobj['Event']['id'], },
+        # Push to log
+        jsonobj_tmp = { 'Event': 
+                { 'id': jsonobj['Event']['id'] },
                 'Attribute': {
                     'id': jsonobj['Attribute']['id'],
                     'type': jsonobj['Attribute']['type'],
@@ -259,8 +271,7 @@ def handler_attribute(zmq_name, jsonobj, hasAlreadyBeenContributed=False, parent
                     'timestamp': jsonobj['Attribute']['timestamp'],
                     'value': jsonobj['Attribute']['value'],
                     'comment': jsonobj['Attribute']['comment'],
-        }}
-        # Push to log
+                }}
         live_helper.publish_log(zmq_name, attributeType, jsonobj_tmp)
     else:
         failas = open("/tmp/debugas","a")
@@ -313,6 +324,24 @@ def check_ip(ip_addr, cidr_array): #Checks if IP is under listed CIDRs
       for cidr in cidr_array:
         if ipAddress in cidr: return True
       return False
+
+def check_event_tag(eventid):
+    url = "https://misp-zeromq:8443/events/" + eventid
+    re = requests.post(url,
+                       verify=False,
+                       headers = {"Authorization": dashboard_user_auth_key,
+                                  "Accept": "application/json",
+                                  "Content-Type": "application/json"
+                                }
+        )
+    re_json = json.loads(re.text)
+    import_all_attributes = False
+    if 'Tag' in re_json['Event']:
+      for tag in re_json['Event']['Tag']:
+        if tag['name'] == import_tag_all_attributes:
+          import_all_attributes = True
+
+    return import_all_attributes
 
 def main(sleeptime):
     updates.check_for_updates()
