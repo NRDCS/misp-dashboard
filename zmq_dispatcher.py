@@ -283,7 +283,19 @@ def handler_attribute(zmq_name, jsonobj, import_all_attributes, hasAlreadyBeenCo
           if check_event_tag(eventid):
             import_all_attributes = True
           if check_ip(jsonobj['Attribute']['value'], cidr_array) or import_all_attributes:
-            print("iterpiam")
+            jsonobj_tmp = { 'Event':
+               { 'id': jsonobj['Event']['id'] },
+               'Attribute': {
+                 'id': jsonobj['Attribute']['id'],
+                 'type': jsonobj['Attribute']['type'],
+                 'category': jsonobj['Attribute']['category'],
+                 'event_id': jsonobj['Attribute']['event_id'],
+                 'timestamp': jsonobj['Attribute']['timestamp'],
+                 'value': jsonobj['Attribute']['value'],
+                 'comment': jsonobj['Attribute']['comment'],
+               }}
+            live_helper.publish_log(zmq_name, attributeType, jsonobj_tmp)
+
 
           
 
@@ -411,5 +423,3 @@ if __name__ == "__main__":
         main(args.sleeptime)
     except (redis.exceptions.ResponseError, KeyboardInterrupt) as error:
         print(error)
-
-
