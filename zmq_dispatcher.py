@@ -14,13 +14,12 @@ import time
 import redis
 import zmq
 
-import util
-import updates
-
+import requests
 import ipaddress
 import re
-import requests
 
+import util
+import updates
 from helpers import (contributor_helper, geo_helper, live_helper,
                      trendings_helper, users_helper)
 
@@ -28,14 +27,17 @@ configfile = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'config/c
 cfg = configparser.ConfigParser()
 cfg.read(configfile)
 
-cidr_array = []
-
-clientInfo = cfg.get('Log','clientInfo')
 logDir = cfg.get('Log', 'directory')
 logfilename = cfg.get('Log', 'dispatcher_filename')
+logPath = os.path.join(logDir, logfilename)
+
+cidr_array = []
+clientInfo = cfg.get('Log','clientInfo')
 import_tag_all_attributes = cfg.get('Log', 'import_tag_all_attributes')
 dashboard_user_auth_key = cfg.get('Log', 'dashboard_user_auth_key')
-logPath = os.path.join(logDir, logfilename)
+import_all_attributes = False
+
+
 if not os.path.exists(logDir):
     os.makedirs(logDir)
 try:
@@ -44,7 +46,6 @@ except PermissionError as error:
     print(error)
     print("Please fix the above and try again.")
     sys.exit(126)
-
 logger = logging.getLogger('zmq_dispatcher')
 
 LISTNAME = cfg.get('RedisLIST', 'listName')
@@ -98,17 +99,19 @@ def handler_audit(zmq_name, jsondata):
     else:
         pass
 
-def handler_dispatcher(zmq_name, jsonObj):
+def handler_dispatcher(zmq_name, jsonObj, tmp):
     if "Event" in jsonObj:
-        handler_event(zmq_name, jsonObj)
+      if "Attribute" in jsonObj['Event']:
+        handler_event(zmq_name, jsonObj, tmp)
 
-def handler_keepalive(zmq_name, jsonevent):
+
+def handler_keepalive(zmq_name, jsonevent, tmp):
     logger.info('Handling keepalive')
     to_push = [ jsonevent['uptime'] ]
     live_helper.publish_log(zmq_name, 'Keepalive', to_push)
 
 # Login are no longer pushed by `misp_json_user`, but by `misp_json_audit`
-def handler_user(zmq_name, jsondata):
+def handler_user(zmq_name, jsondata, tmp):
     logger.info('Handling user')
     action = jsondata['action']
     json_user = jsondata['User']
@@ -119,7 +122,7 @@ def handler_user(zmq_name, jsondata):
     else:
         pass
 
-def handler_conversation(zmq_name, jsonevent):
+def handler_conversation(zmq_name, jsonevent, tmp):
     logger.info('Handling conversation')
     try: #only consider POST, not THREAD
         jsonpost = jsonevent['Post']
@@ -168,11 +171,10 @@ def handler_sighting(zmq_name, jsondata):
     elif jsonsight['type'] == "1": # false positive
         trendings_helper.addFalsePositive(timestamp)
 
-def handler_event(zmq_name, jsonobj):
+def handler_event(zmq_name, jsonobj, tmp):
     logger.info('Handling event')
     #fields: threat_level_id, id, info
     jsonevent = jsonobj['Event']
-
     #Add trending
     eventName = jsonevent['info']
     timestamp = jsonevent['timestamp']
@@ -182,6 +184,13 @@ def handler_event(zmq_name, jsonobj):
         tags.append(tag)
     trendings_helper.addTrendingTags(tags, timestamp)
 
+    import_all_attributes = False
+    eventid = jsonevent['id']
+    if "Attribute" in jsonevent:
+      if check_event_tag(eventid):
+        import_all_attributes = True
+
+
     #redirect to handler_attribute
     if 'Attribute' in jsonevent:
         attributes = jsonevent['Attribute']
@@ -189,9 +198,10 @@ def handler_event(zmq_name, jsonobj):
             for attr in attributes:
                 jsoncopy = copy.deepcopy(jsonobj)
                 jsoncopy['Attribute'] = attr
-                handler_attribute(zmq_name, jsoncopy)
+                #handler_attribute(zmq_name, jsoncopy)
+                handler_attribute(zmq_name, attr, import_all_attributes)
         else:
-            handler_attribute(zmq_name, attributes)
+            handler_attribute(zmq_name, attributes, import_all_attributes)
 
     if 'Object' in jsonevent:
         objects = jsonevent['Object']
@@ -214,7 +224,7 @@ def handler_event(zmq_name, jsonobj):
                         action,
                         isLabeled=eventLabeled)
 
-def handler_attribute(zmq_name, jsonobj, hasAlreadyBeenContributed=False, parentObject=False):
+def handler_attribute(zmq_name, jsonobj, import_all_attributes, hasAlreadyBeenContributed=False, parentObject=False):
     logger.info('Handling attribute')
     # check if jsonattr is an attribute object
     if 'Attribute' in jsonobj:
@@ -223,7 +233,7 @@ def handler_attribute(zmq_name, jsonobj, hasAlreadyBeenContributed=False, parent
         jsonattr = jsonobj
 
     attributeType = 'Attribute' if jsonattr['object_id'] == '0' else 'ObjectAttribute'
-
+    
     #Add trending
     categName = jsonattr['category']
     timestamp = jsonattr.get('timestamp', int(time.time()))
@@ -233,50 +243,52 @@ def handler_attribute(zmq_name, jsonobj, hasAlreadyBeenContributed=False, parent
         tags.append(tag)
     trendings_helper.addTrendingTags(tags, timestamp)
 
-    import_all_attributes = False
-    if 'Tag' in jsonobj['Event']:
-      for tag in jsonobj['Event']['Tag']:
-        if tag['name'] == import_tag_all_attributes:
-          import_all_attributes = True
-    else:
-        eventid = jsonobj['Attribute']['event_id']
-        if check_event_tag(eventid):
+
+    if not import_all_attributes:
+      if 'Tag' in jsonobj:
+        for tag in jsonobj['Tag']:
+          if tag['name'] == import_tag_all_attributes:
             import_all_attributes = True
+   
+    if "value" in jsonattr:
+     if check_ip(jsonattr['value'], cidr_array) or import_all_attributes:
+        
+      #try to get coord from ip
+      if jsonattr['category'] == "Network activity":
+        geo_helper.getCoordFromIpAndPublish(jsonattr['value'], jsonattr['category'])
 
-    if check_ip(jsonattr['value'], cidr_array) or import_all_attributes:
-    #    try to get coord from ip
-        if jsonattr['category'] == "Network activity":
-            geo_helper.getCoordFromIpAndPublish(jsonattr['value'], jsonattr['category'])
+      #try to get coord from ip
+      if jsonattr['type'] == "phone-number":
+        geo_helper.getCoordFromPhoneAndPublish(jsonattr['value'], jsonattr['category'])
 
-        #try to get coord from ip
-        if jsonattr['type'] == "phone-number":
-            geo_helper.getCoordFromPhoneAndPublish(jsonattr['value'], jsonattr['category'])
-
-        if not hasAlreadyBeenContributed:
-            eventLabeled = len(jsonobj.get('EventTag', [])) > 0
-            action = jsonobj.get('action', None)
-            contributor_helper.handleContribution(zmq_name, jsonobj['Event']['Orgc']['name'],
-                                attributeType,
-                                jsonattr['category'],
-                                action,
-                                isLabeled=eventLabeled)
-        # Push to log
-        jsonobj_tmp = { 'Event': 
-                { 'id': jsonobj['Event']['id'] },
-                'Attribute': {
-                    'id': jsonobj['Attribute']['id'],
-                    'type': jsonobj['Attribute']['type'],
-                    'category': jsonobj['Attribute']['category'],
-                    'event_id': jsonobj['Attribute']['event_id'],
-                    'timestamp': jsonobj['Attribute']['timestamp'],
-                    'value': jsonobj['Attribute']['value'],
-                    'comment': jsonobj['Attribute']['comment'],
-                }}
+      # Push to log
+      if "event_id" in jsonobj:
+        jsonobj_tmp = { 'Event':
+               { 'id': jsonobj['event_id'] },
+               'Attribute': {
+                 'id': jsonobj['id'],
+                 'type': jsonobj['type'],
+                 'category': jsonobj['category'],
+                 'event_id': jsonobj['event_id'],
+                 'timestamp': jsonobj['timestamp'],
+                 'value': jsonobj['value'],
+                 'comment': jsonobj['comment'],
+            }}
         live_helper.publish_log(zmq_name, attributeType, jsonobj_tmp)
-    else:
-        failas = open("/tmp/debugas","a")
-        failas.write(jsonattr['value'] + "\n")
-        failas.close()
+
+    if "Attribute" in jsonobj:
+      if "action" in jsonobj:
+        if jsonobj['action'] == "add":
+          eventid = jsonobj['Attribute']['event_id']
+          if check_event_tag(eventid):
+            import_all_attributes = True
+          if check_ip(jsonobj['Attribute']['value'], cidr_array) or import_all_attributes:
+            print("iterpiam")
+
+          
+
+
+      #live_helper.publish_log(zmq_name, attributeType, jsonobj)
 
 def handler_diagnostic_tool(zmq_name, jsonobj):
     try:
@@ -294,6 +306,14 @@ def process_log(zmq_name, event):
     jsonevent = json.loads(eventdata)
     try:
         dico_action[topic](zmq_name, jsonevent)
+    except KeyError as e:
+        logger.error(e)
+
+def process_log(zmq_name, event):
+    topic, eventdata = event.split(' ', maxsplit=1)
+    jsonevent = json.loads(eventdata)
+    try:
+        dico_action[topic](zmq_name, jsonevent, False)
     except KeyError as e:
         logger.error(e)
 
@@ -345,7 +365,7 @@ def check_event_tag(eventid):
 
 def main(sleeptime):
     updates.check_for_updates()
-    
+
     cidr_array = create_cidr_array()
 
     numMsg = 0
@@ -391,4 +411,5 @@ if __name__ == "__main__":
         main(args.sleeptime)
     except (redis.exceptions.ResponseError, KeyboardInterrupt) as error:
         print(error)
+
 
