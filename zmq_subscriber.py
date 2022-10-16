@@ -76,3 +76,4 @@ if __name__ == "__main__":
         main(args.zmqname, args.zmqurl)
     except redis.exceptions.ResponseError as error:
         print(error)
+
